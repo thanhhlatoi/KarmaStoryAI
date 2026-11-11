@@ -1,0 +1,17 @@
+{
+  "languages": ["de", "en", "es"],
+  "style": "A",
+  "style_note": "Giu mau sac Viet Nam (vd 'Una leyenda de Vietnam'), giai thich ngan khai niem nhan qua/ban tho/cung.",
+  "audience": "60+ o Duc, Hoa Ky, Tay Ban Nha",
+  "target_minutes": [30, 40],
+  "words_per_minute": {"de": 150, "en": 150, "es": 150},
+  "score_threshold": 8.0,
+  "min_each_criterion": 6.0,
+  "max_rounds": 5,
+  "stories_dir": "stories",
+  "max_continuations": 8,
+  "llm": {
+    "writer": {"type": "cli", "cmd": ["codex", "exec"], "timeout": 300, "attempts": 3},
+    "scorer": {"type": "cli", "cmd": ["claude", "-p"], "timeout": 300, "attempts": 3}
+  }
+}
