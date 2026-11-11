@@ -12,7 +12,6 @@ Tệp tạo ra trong --out-dir:
   <lang>.review.json/.md      tổng hợp điểm
 """
 import argparse
-import hashlib
 import json
 import math
 import re
@@ -20,7 +19,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from karma import llm
+from karma import glossary as gl, llm
 from karma.common import atomic_write, config, length_check, read, save_json, words_per_minute
 
 LANGUAGES = {'de': 'German for older listeners in Germany',
@@ -31,15 +30,11 @@ WEIGHTS = {'fidelity': .30, 'naturalness': .25, 'read_aloud': .20,
 END = '[[END_TRANSLATION]]'
 MAX_CONTINUATIONS = 3
 TAIL_CHARS = 600
-MIN_AVOID = 4
 # Số từ đích trên mỗi tiếng Việt, đo từ truyện 017 (vòng 2 → bản dịch round1).
 VI_RATIO = {'de': 1.18, 'en': 1.15, 'es': 1.18}
 INVISIBLE = dict.fromkeys(map(ord, '­​‌‍⁠﻿'))
-ENTRY = re.compile(r'^\s*[-*]\s+(.+?)\s*=>\s*(.+?)\s*(?:;\s*avoid:\s*(.+))?$')
-
-
-def sha(text):
-    return hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
+sha = gl.sha
+parse_glossary = gl.parse_entries
 
 
 def words(text):
@@ -72,18 +67,6 @@ def split_chapters(text, fallback_words=2500):
 
 # ---------- Bảng thuật ngữ ----------
 
-def parse_glossary(text):
-    """Trả danh sách (nguồn, đích, [biến thể cấm]) từ các dòng '- nguồn => đích; avoid: a, b'."""
-    entries = []
-    for line in text.splitlines():
-        match = ENTRY.match(line)
-        if match:
-            avoid = [x.strip(' "„“”\'`') for x in (match[3] or '').split(',')]
-            # Biến thể < 4 ký tự (Sie, Man, Tin...) trùng từ thường của ngôn ngữ đích: bỏ qua.
-            entries.append((match[1], match[2], [x for x in avoid if len(x) >= MIN_AVOID]))
-    return entries
-
-
 def glossary_issues(text, glossary):
     issues = []
     for source, target, avoid in glossary:
@@ -95,21 +78,30 @@ def glossary_issues(text, glossary):
     return issues
 
 
-def ensure_glossary(source_text, folder, lang):
+def ensure_glossary(source_text, folder, lang, accept_glossary=False):
     path = folder / f'glossary.{lang}.md'
     if path.exists():
-        return read(path)
+        text = read(path)
+        status = gl.source_status(text, source_text)
+        if status == 'stale' and not accept_glossary:
+            raise ValueError(f'{path.name} được tạo cho một bản Việt khác (nguồn đã đổi). Xóa file để tạo lại, '
+                             f'dùng --out-dir mới, hoặc --accept-glossary nếu chắc vẫn đúng.')
+        if status == 'unknown':
+            print(f'[{lang}] Cảnh báo: {path.name} không có dấu nguồn, không kiểm tra được có khớp bản Việt không.',
+                  flush=True)
+        return text
     prompt = f'''Read the Vietnamese story below and write a translation glossary for rendering it into {LANGUAGES[lang]}.
 Output Markdown only, in these sections, one entry per line in EXACTLY this format:
 - <Vietnamese term> => <chosen rendering>; avoid: <comma-separated LITERAL wrong words/phrases in the target language, each at least 4 letters; never pronouns, grammar choices (du/Sie, tu/usted) or descriptions - put those in the rendering instead>
-Sections: ## Names (every character, nickname/real-name clues, places), ## Address and kinship (how each person is addressed by each other and by the narrator, honorifics, consistent use of formal/informal forms), ## Cultural objects (each unfamiliar object with ONE rendering and, if needed, a very short in-prose gloss for first use), ## Ambiguities (relationships or facts the source leaves unclear: say "keep ambiguous", never resolve them), ## Style (3-6 bullet lines of tone rules for listeners 60+, no "=>" needed).
+Sections: ## Names (every character, nickname/real-name clues, places), ## Address and kinship (how each person is addressed by each other and by the narrator, honorifics, consistent use of formal/informal forms), ## Cultural objects (each unfamiliar object with ONE rendering and, if needed, a very short in-prose gloss for first use), ## Ambiguities (relationships or facts the source leaves unclear: say "keep ambiguous", never resolve them), ## Style (3-6 bullet lines of tone rules for listeners 60+, no "=>" needed), ## Pronunciation (every name or kept Vietnamese word that has Vietnamese diacritics, as "- <word as written> => <respelling a {LANGUAGES[lang].split(' for ')[0]} text-to-speech voice will pronounce close to Vietnamese, using only plain letters of that language>"; no avoid list).
 Be concise. Do not translate the story. Do not use tools.
 VIETNAMESE STORY:
 {source_text}'''
     answer = llm.complete('writer', prompt).strip()
     answer = re.sub(r'^```\w*\n|\n```$', '', answer).strip()
-    atomic_write(path, answer + '\n')
-    return answer + '\n'
+    answer = gl.header(source_text) + '\n' + answer + '\n'
+    atomic_write(path, answer)
+    return answer
 
 
 # ---------- Dịch một chương ----------
@@ -238,15 +230,33 @@ def check_source_length(source_text, lang, cfg):
                          f'(hoặc dùng --ignore-length).')
     return round(minutes, 1)
 
-def process(source, folder, lang, max_rounds=2, glossary_only=False, ignore_length=False):
+def process(source, folder, lang, max_rounds=2, glossary_only=False, ignore_length=False, accept_glossary=False):
+    with llm.tagged(f'{folder.name}/{lang}'):
+        _process(source, folder, lang, max_rounds, glossary_only, ignore_length, accept_glossary)
+
+
+def vi_grade_status(source):
+    path = source.with_name(source.name + '.score.json')
+    if not path.exists():
+        return 'Chưa chấm bản Việt (python3 -m karma grade <file> --lang vi); nên chấm trước khi tốn tiền dịch.'
+    data = json.loads(read(path))
+    if data.get('source_sha') not in (None, sha(read(source))):
+        return 'Bản Việt đã sửa sau lần chấm; nên chấm lại.'
+    return '' if data.get('pass') else f"Bản Việt chưa đạt ({data.get('score', 0):.2f}); nên sửa trước khi dịch."
+
+
+def _process(source, folder, lang, max_rounds, glossary_only, ignore_length, accept_glossary):
     cfg = config()
     threshold, min_each = cfg['score_threshold'], cfg['min_each_criterion']
     folder.mkdir(parents=True, exist_ok=True)
     source_text = read(source)
     if not ignore_length:
         print(f'[{lang}] ước tính ~{check_source_length(source_text, lang, cfg)} phút.', flush=True)
+    warning = vi_grade_status(source)
+    if warning:
+        print(f'[{lang}] Cảnh báo: {warning}', flush=True)
     chapters = split_chapters(source_text)
-    glossary_text = ensure_glossary(source_text, folder, lang)
+    glossary_text = ensure_glossary(source_text, folder, lang, accept_glossary)
     if glossary_only:
         print(f'Đã tạo glossary.{lang}.md; sửa tay nếu cần rồi chạy lại.', flush=True)
         return
@@ -257,10 +267,11 @@ def process(source, folder, lang, max_rounds=2, glossary_only=False, ignore_leng
     results = []
     for index, src in enumerate(chapters, 1):
         number = f'{index:02d}'
-        stamp = sha(src) + sha(glossary_text)
+        # Chỉ phần glossary liên quan tới chương này: sửa một thuật ngữ không dịch lại cả truyện.
+        stamp = sha(src) + gl.chapter_stamp(glossary_text, src)
         if meta.get(number) != stamp:
             for old in cdir.glob(f'{number}.r*'):
-                old.unlink()   # nguồn hoặc bảng thuật ngữ đổi: bỏ kết quả cũ của chương này
+                old.unlink()   # nguồn chương hoặc thuật ngữ liên quan đổi: bỏ kết quả cũ của chương này
             meta[number] = stamp
             save_json(meta_path, meta)
         prev_src = chapters[index - 2][-TAIL_CHARS:] if index > 1 else ''
@@ -309,7 +320,7 @@ def finish(source, folder, lang, results, threshold, min_each, cfg):
     passed = (score >= threshold and all(v >= min_each for v in criteria.values())
               and all(r['ok'] for r in results) and length['ok'])
     review = dict(score=score, criteria=criteria, reviewer='Claude CLI',
-                  length={k: length[k] for k in ('minutes', 'words', 'ok')},
+                  length={k: length[k] for k in ('minutes', 'words', 'ok')}, translation_sha=sha(full),
                   source_file=str(source), translation_file=str(folder / f'{lang}.md'),
                   chapters=[dict(chapter=r['number'], round=r['round'], score=r['review']['score'],
                                  ok=r['ok'], local_issues=r['local_issues'],
@@ -348,6 +359,8 @@ def main():
                         help='số vòng dịch/sửa tối đa cho mỗi chương (mặc định 2)')
     parser.add_argument('--ignore-length', action='store_true',
                         help='bỏ qua kiểm tra độ dài bản Việt trước khi dịch')
+    parser.add_argument('--accept-glossary', action='store_true',
+                        help='dùng glossary có sẵn dù được tạo cho bản Việt khác')
     parser.add_argument('--glossary-only', action='store_true',
                         help='chỉ tạo glossary.<lang>.md để sửa tay rồi dừng')
     args = parser.parse_args()
@@ -355,7 +368,7 @@ def main():
         parser.error('--max-rounds phải >= 1')
     for lang in LANGUAGES if args.lang == 'all' else (args.lang,):
         process(args.source.resolve(), args.out_dir.resolve(), lang, args.max_rounds, args.glossary_only,
-                args.ignore_length)
+                args.ignore_length, args.accept_glossary)
 
 
 if __name__ == '__main__':

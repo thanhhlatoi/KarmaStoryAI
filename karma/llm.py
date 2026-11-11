@@ -1,4 +1,5 @@
 """Provider CLI/OpenAI, gọi tuần tự, timeout và retry; không log nội dung."""
+import contextlib
 import fcntl
 import json
 import os
@@ -11,6 +12,20 @@ from pathlib import Path
 import tempfile
 
 from .common import DEFAULT_PROVIDERS, config, root
+
+
+_TAG = None
+
+
+@contextlib.contextmanager
+def tagged(tag):
+    """Gắn nhãn (vd '017/de') cho mọi lần gọi model trong khối, để thống kê chi phí theo truyện."""
+    global _TAG
+    previous, _TAG = _TAG, tag
+    try:
+        yield
+    finally:
+        _TAG = previous
 
 
 class Completion(str):
@@ -125,8 +140,10 @@ def complete(role, prompt):
                     raise ValueError("Model trả nội dung rỗng.")
             except (OSError, ValueError, RuntimeError, KeyError, IndexError, TypeError) as exc:
                 error = exc
-            entry = {"time": datetime.now(timezone.utc).isoformat(), "role": role,
-                     "prompt_length": len(prompt), "seconds": round(time.monotonic() - start, 3),
+            entry = {"time": datetime.now(timezone.utc).isoformat(), "role": role, "tag": _TAG,
+                     "prompt_length": len(prompt),
+                     "answer_length": len(answer) if error is None else 0,
+                     "seconds": round(time.monotonic() - start, 3),
                      "success": error is None, "attempt": attempt + 1}
             with (work / "llm.log").open("a", encoding="utf-8") as log:
                 log.write(json.dumps(entry) + "\n")

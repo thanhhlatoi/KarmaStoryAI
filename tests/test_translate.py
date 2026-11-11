@@ -167,9 +167,61 @@ class Pipeline(unittest.TestCase):
     def test_changed_source_chapter_is_retranslated_others_kept(self):
         self.run_with(Fake())
         self.source.write_text(SOURCE.replace('Beta beta', 'Beta beta changed'), encoding='utf-8')
+        with self.assertRaises(ValueError):            # glossary cũ tạo cho nguồn khác: chặn
+            self.run_with(Fake())
+        fake = Fake()
+        self.run_with(fake, accept_glossary=True)
+        self.assertEqual(len([1 for r, _ in fake.calls if r == 'writer']), 1)
+
+    def test_glossary_has_source_header_and_asks_for_pronunciation(self):
+        fake = Fake()
+        self.run_with(fake, glossary_only=True)
+        text = (self.out / 'glossary.de.md').read_text()
+        self.assertEqual(tr.gl.source_status(text, SOURCE), 'ok')
+        self.assertIn('## Pronunciation', fake.calls[0][1])
+
+    def test_glossary_edit_retranslates_only_affected_chapter(self):
+        self.run_with(Fake())
+        path = self.out / 'glossary.de.md'
+        path.write_text(path.read_text() + '- Gamma => Gammawort; avoid: Falschwort\n')
         fake = Fake()
         self.run_with(fake)
-        self.assertEqual(len([1 for r, _ in fake.calls if r == 'writer']), 1)
+        writer = [p for r, p in fake.calls if r == 'writer']
+        self.assertEqual(len(writer), 1)
+        self.assertIn('Gamma', writer[0].split('VIETNAMESE CHAPTER:')[1])
+        path.write_text(path.read_text() + '\n## Pronunciation\n- Mận => Man\n')
+        fake = Fake()
+        self.run_with(fake)                             # phát âm không ảnh hưởng bản dịch
+        self.assertEqual(fake.calls, [])
+
+    def test_prep_translation_uses_pronunciation_and_detects_edits(self):
+        from karma.cli_prep import prep_translation
+        fake = Fake(translations={('Beta', False): 'Frau Mận sprach mit Bờm.'})
+        self.run_with(fake)
+        path = self.out / 'glossary.de.md'
+        path.write_text(path.read_text() + '\n## Pronunciation\n- Bờm => Böm\n')
+        prep_translation(self.out, 'de')
+        tts = (self.out / 'de.tts.txt').read_text()
+        self.assertIn('Frau Man sprach mit Böm.', tts)   # Mận tự bỏ dấu, Bờm theo glossary
+        scenes = json.loads((self.out / 'de.scenes.json').read_text())
+        self.assertIn('Frau Mận sprach mit Bờm.', [s['paragraph'] for s in scenes])
+        (self.out / 'de.md').write_text('sửa tay')
+        with self.assertRaises(ValueError):
+            prep_translation(self.out, 'de')
+
+    def test_prep_translation_rejects_failed_review(self):
+        from karma.cli_prep import prep_translation
+        self.run_with(Fake(review_scores={('Beta', False): 5, ('Beta', True): 5}))
+        with self.assertRaises(ValueError):
+            prep_translation(self.out, 'de')
+
+    def test_vi_grade_warning(self):
+        self.assertIn('Chưa chấm', tr.vi_grade_status(self.source))
+        score = self.source.with_name(self.source.name + '.score.json')
+        score.write_text(json.dumps({'pass': True, 'score': 8.5, 'source_sha': tr.sha(SOURCE)}))
+        self.assertEqual(tr.vi_grade_status(self.source), '')
+        self.source.write_text(SOURCE + 'thêm\n', encoding='utf-8')
+        self.assertIn('đã sửa', tr.vi_grade_status(self.source))
 
     def test_source_outside_target_length_is_rejected_before_any_call(self):
         cfg = json.loads((self.root / 'config.json').read_text())

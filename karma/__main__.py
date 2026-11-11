@@ -1,7 +1,7 @@
 import argparse
 import sys
 
-from . import cli_clean, cli_grade, cli_loop, cli_prep, cli_score, cli_skeleton, cli_write
+from . import cli_clean, cli_grade, cli_loop, cli_prep, cli_score, cli_skeleton, cli_usage, cli_write
 
 
 def positive(value):
@@ -24,7 +24,8 @@ def main(argv=None):
     skeleton.set_defaults(handler=cli_skeleton.run)
     grade = commands.add_parser("grade", help="Chấm trực tiếp file kịch bản bất kỳ bằng Claude")
     grade.add_argument("files", nargs="+")
-    grade.add_argument("--lang", choices=("de", "en", "es"), help="Mặc định đoán từ tên file (vd en.txt)")
+    grade.add_argument("--lang", choices=("de", "en", "es", "vi"),
+                       help="Mặc định đoán từ tên file (vd en.txt); bản Việt dùng --lang vi")
     grade.add_argument("--skeleton", help="Đường dẫn bộ xương để đối chiếu (tùy chọn)")
     grade.add_argument("--force", action="store_true", help="Gọi Claude chấm lại")
     grade.set_defaults(handler=cli_grade.run)
@@ -38,6 +39,14 @@ def main(argv=None):
         if name != "prep":
             command.add_argument("--force", action="store_true")
         command.set_defaults(handler=module.run)
+    prep_tr = commands.add_parser("prep-translation", help="Chuẩn bị TTS cho bản dịch đã đạt của translate_review.py")
+    prep_tr.add_argument("dir", help="Thư mục --out-dir đã dùng khi dịch")
+    prep_tr.add_argument("--lang", required=True, choices=("de", "en", "es", "all"))
+    prep_tr.set_defaults(handler=cli_prep.run_translation)
+    usage = commands.add_parser("usage", help="Thống kê số lần gọi model, ký tự và thời gian theo truyện")
+    usage.add_argument("--tag", help="Lọc theo tiền tố nhãn, vd 017 hoặc 017/de")
+    usage.add_argument("--since", help="Chỉ tính từ thời điểm ISO, vd 2026-11-11")
+    usage.set_defaults(handler=cli_usage.run)
     args = parser.parse_args(argv)
     try:
         args.handler(args)

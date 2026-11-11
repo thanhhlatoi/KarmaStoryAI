@@ -99,6 +99,20 @@ class LengthTests(Workspace):
         with self.assertRaises(ValueError):
             prep("001", "en")
 
+    def test_grade_vietnamese_source_checks_length_in_syllables(self):
+        from karma.cli_grade import grade_file
+        self.configure(target_minutes=[30, 40], words_per_minute={"vi": 130})
+        source = self.root / "truyen.md"
+        source.write_text("# TIÊU ĐỀ\n" + "tiếng " * 5000, encoding="utf-8")
+        with patch("karma.llm.complete", return_value=json.dumps(grade(9))) as fake:
+            result = grade_file(source, "vi")
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["length"]["minutes"], 38.5)
+        self.assertIn("BẢN VIỆT GỐC", fake.call_args[0][1])
+        saved = json.loads((self.root / "truyen.md.score.json").read_text())
+        self.assertIn("source_sha", saved)
+        self.assertEqual(main(["grade", str(source), "--lang", "vi"]), 0)
+
     def test_invalid_target_minutes(self):
         self.configure(target_minutes=[40, 30])
         with self.assertRaises(ValueError):

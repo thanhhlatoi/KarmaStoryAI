@@ -44,4 +44,5 @@ def build(story_id, force=False):
 
 
 def run(args):
-    build(args.id, args.force)
+    with llm.tagged(f"{args.id}/skeleton"):
+        build(args.id, args.force)

@@ -1,6 +1,7 @@
 import json
 import re
 
+from . import llm
 from .cli_score import evaluate, score_round
 from .cli_write import write_round
 from .common import atomic_write, config, languages, read, story_dir
@@ -68,4 +69,5 @@ def loop(story_id, lang, force=False):
 
 def run(args):
     for lang in languages(args.lang):
-        loop(args.id, lang, args.force)
+        with llm.tagged(f"{args.id}/{lang}"):
+            loop(args.id, lang, args.force)
